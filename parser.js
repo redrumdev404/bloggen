@@ -1,14 +1,14 @@
 const MarkdownParser = {
-  inlineRules: [
-    { reg: /<!--[\s\S]*?-->|<\/?[a-zA-Z][^>]*>/g, replace: (m, tokens) => `\u0000T${tokens.push(m) - 1}\u0000` },
-    { reg: /!\[([^\]]*)\]\(([^)\s]+)\)/gi, replace: (_, alt, url) => `<img src="${url}" alt="${alt}">` },
-    { reg: /\[([^\]]+)\]\(((?:ext\s+)?([^)\s]+))\)/gi, replace: (_, label, full, url) => `<a href="${url}"${full.toLowerCase().startsWith('ext ') ? ' target="_blank"' : ''} rel="noopener noreferrer">${label}</a>` },
-    { reg: /~~(.+?)~~/g, replace: '<del>$1</del>' },
-    { reg: /\*\*(.+?)\*\*/g, replace: '<strong>$1</strong>' },
-    { reg: /__(.+?)__/g, replace: '<u>$1</u>' },
-    { reg: /(^|[^\w])\*([^*\n]+)\*(?!\w)/g, replace: '$1<em>$2</em>' },
-    { reg: /:([a-zA-Z0-9_-]+)\s+(.+?):/g, replace: (_, cls, content) => `<span class="${cls}">${content}</span>` }
-  ],
+	inlineRules: [
+		{ reg: /<!--[\s\S]*?-->|<\/?[a-zA-Z][^>]*>/g, replace: (m, t) => `\u0000T${t.push(m) - 1}\u0000` },
+		{ reg: /!\[([^\]]*)\]\(([^)\s]+)\)/gi, replace: '<img src="$2" alt="$1">' },
+		{ reg: /\[([^\]]+)\]\(((?:ext\s+)?([^)\s]+))\)/gi, replace: (_, l, f, u) => `<a href="${u}"${f.toLowerCase().startsWith('ext ') ? ' target="_blank"' : ''} rel="noopener noreferrer">${l}</a>` },
+		{ reg: /~~([^~]+?)~~/g, replace: '<del>$1</del>' },
+		{ reg: /\*\*([^*]+?)\*\*/g, replace: '<strong>$1</strong>' },
+		{ reg: /__([^_]+?)__/g, replace: '<u>$1</u>' },
+		{ reg: /(^|[^\w])\*([^* \n][^*\n]*?)\*(?!\w)/g, replace: '$1<em>$2</em>' },
+		{ reg: /:([a-zA-Z0-9_-]+)\s+([^:]+?):/g, replace: '<span class="$1">$2</span>' }
+	],
   parse(md) {
     const tokens = [], html = [], paragraphs = [];
     let inTable = false, inList = false, listType = null;
@@ -21,21 +21,20 @@ const MarkdownParser = {
       }
       paragraphs.length = 0;
     };
-    const closeList = () => { if (inList) { html.push(`</${listType}>`); inList = false; listType = null; } };
+    const closeList = () => { if (inList) { html.push(`</${listType}>`); inList = false; listType = null; }};
     for (const line of md.replace(/\r\n?/g, "\n").split("\n")) {
       const trimmed = line.trim();
       if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
         closeList();
-        if (!inTable) { flush(); html.push('<table'); inTable = true; }
+        if (!inTable) { flush(); html.push('<table>'); inTable = true; }
         if (/^\|[\s\d\w]*[:\s\-|]*\|$/.test(trimmed) && trimmed.includes('-')) continue;
-        const cells = trimmed.split('|').slice(1, -1);
-        const tag = html[html.length - 1] === '<table>' ? 'th' : 'td';
+        const cells = trimmed.split('|').slice(1, -1), tag = html[html.length - 1] === '<table>' ? 'th' : 'td';
         html.push(`<tr>${cells.map(c => `<${tag}>${this.parseInline(c.trim(), tokens)}</${tag}>`).join('')}</tr>`);
         continue;
       }
-      const ul = trimmed.match(/^([\*\-\+])\s+(.+)$/), ol = trimmed.match(/^(\d+)\.\s+(.+)$/);
-      if (ul || ol) {
-        const type = ul ? 'ul' : 'ol', content = ul ? ul[2] : ol[2];
+      const listMatch = trimmed.match(/^([\*\-\+]|\d+\.)\s+(.+)$/);
+      if (listMatch) {
+        const isOl = /\d/.test(listMatch[1]), type = isOl ? 'ol' : 'ul', content = listMatch[2];
         if (inList && listType !== type) closeList();
         if (!inList) { flush(); html.push(`<${type}>`); inList = true; listType = type; }
         html.push(`<li>${this.parseInline(content, tokens)}</li>`);
@@ -44,15 +43,17 @@ const MarkdownParser = {
       if (inTable) { html.push('</table>'); inTable = false; }
       closeList();
       if (!trimmed) { flush(); continue; }
-      if (/^!\[([^\]]*)\]\(([^)\s]+)\)$/.test(trimmed)) { flush(); html.push(this.parseInline(trimmed, tokens)); continue; }
       if (/^<\/?[a-zA-Z][^>]*>|^<!--[\s\S]*-->/.test(trimmed)) { flush(); html.push(line); continue; }
+      if (/^!\[([^\]]*)\]\(([^)\s]+)\)$/.test(trimmed)) { flush(); html.push(this.parseInline(trimmed, tokens)); continue; }
       const h = line.match(/^(#{1,6})[ \t]+(.+?)\s*#*\s*$/);
       if (h) { flush(); html.push(`<h${h[1].length}>${this.parseInline(h[2], tokens)}</h${h[1].length}>`); continue; }
       paragraphs.push(line);
     }
     if (inTable) html.push('</table>');
     closeList(); flush();
-    return html.join("\n");
+    const result = html.join("\n");
+    tokens.length = 0; 
+    return result;
   },
   parseInline(text, tokens) {
     let res = text.replace(this.inlineRules[0].reg, m => this.inlineRules[0].replace(m, tokens));
@@ -61,13 +62,38 @@ const MarkdownParser = {
     return res.replace(/\u0000T(\d+)\u0000/g, (_, i) => tokens[i]);
   },
   async init() {
-    await Promise.all(Array.from(document.querySelectorAll('[data-md-src]')).map(async div => {
+      const controller = new AbortController();
+      window.addEventListener('pagehide', () => controller.abort(), { once: true });
+      window.addEventListener('unload', () => controller.abort(), { once: true });
       try {
-        const r = await fetch(div.dataset.mdSrc);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        div.innerHTML = this.parse(await r.text());
+        await Promise.all(Array.from(document.querySelectorAll('[data-md-src]')).map(async div => {
+          const url = div.dataset.mdSrc;
+          try {
+		  const startFetch = performance.now();
+            const r = await fetch(url, { signal: controller.signal });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const text = await r.text();
+            const endFetch = performance.now();
+            const startParse = performance.now();
+            const html = this.parse(text);
+            div.innerHTML = html;
+            const endParse = performance.now();
+            console.log(
+              `%c${url}%c\n` +
+              `Hämta: ${(endFetch - startFetch).toFixed(2)}ms\n` +
+              `Parsning: ${(endParse - startParse).toFixed(2)}ms\n` +
+              `Total Tid: ${(endParse - startFetch).toFixed(2)}ms`,
+              "color: #007acc; font-weight: bold;", "color: inherit; font-weight: normal;"
+            );
+          } catch (e) {
+            if (e.name !== 'AbortError') div.innerHTML = `<span class="r">${e.message}</span>`;
+          }
+        }));
       } catch (e) {
-        div.innerHTML = `<span class="r">${e.message}</span>`;
-      }}));
-}};
-if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', () => MarkdownParser.init()); } else { MarkdownParser.init(); }
+        console.error("redrum.js Init Error:", e);
+	}
+  }
+};
+document.readyState === 'loading' 
+? document.addEventListener('DOMContentLoaded', () => MarkdownParser.init()) 
+: MarkdownParser.init();
